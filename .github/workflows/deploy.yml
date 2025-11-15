@@ -26,4 +26,5 @@ jobs:
       - name: Сборка Docker-образа
         run: docker build -t ${{ secrets.DOCKER_USER }}/devops-node-starter:${{ github.sha }} .
 
-
+      - name: Публикация Docker-образа
+        run: docker push ${{ secrets.DOCKER_USER }}/devops-node-starter:${{ github.sha }}
