@@ -2,7 +2,7 @@ name: CI Pipeline
 
 on:
   push:
-    branches: [main]  # Запускать только при пуше в ветку main
+    branches: [ main ]  # Запускать только при пуше в ветку main
 
 jobs:
   build:
@@ -10,3 +10,12 @@ jobs:
 
     steps:
       - uses: actions/checkout@v3  # Клонирует код из репозитория
+
+      - name: install dependencies
+        run: npm ci
+
+      - name: Lint codebase
+        run: npm run lint
+
+      - name: Run tests
+        run: npm test
