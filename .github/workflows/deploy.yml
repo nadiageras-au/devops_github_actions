@@ -2,49 +2,72 @@ name: CI/CD Pipeline
 
 on:
   push:
-    branches: [ main ]  # Запускать только при пуше в ветку main
+    branches: [ main ]
 
 jobs:
   build:
-    runs-on: ubuntu-latest  # Используем GitHub-hosted runner с Ubuntu
+    runs-on: ubuntu-latest  # GitHub-hosted
 
     steps:
-      - uses: actions/checkout@v3  # Клонирует код из репозитория
+      - uses: actions/checkout@v4
 
+      # 1) Подключаем раннер в Tailnet, чтобы видеть 100.x.x.x
       - name: Connect to Tailscale
         uses: tailscale/github-action@v2
         with:
           authkey: ${{ secrets.TS_AUTHKEY }}
+          # рекомендация Tailscale — позже можно перейти на oauth-client-id/secret
 
-      - name: install dependencies
+      # 2) Node (если нужно)
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install dependencies
         run: npm ci
 
-      - name: Lint codebase
+      - name: Lint
         run: npm run lint
 
-      - name: Run tests
+      - name: Test
         run: npm test
 
-      - name: Логин в Docker Hub
-        run: echo "${{ secrets.DOCKER_PASS }}" | docker login -u ${{ secrets.DOCKER_USER }} --password-stdin
+      # 3) Docker build & push
+      - name: Docker login
+        run: echo "${{ secrets.DOCKER_PASS }}" | docker login -u "${{ secrets.DOCKER_USER }}" --password-stdin
 
-      - name: Сборка Docker-образа
-        run: docker build -t ${{ secrets.DOCKER_USER }}/devops-node-starter:${{ github.sha }} .
+      - name: Build image
+        run: docker build -t "${{ secrets.DOCKER_USER }}/devops-node-starter:${{ github.sha }}" .
 
-      - name: Публикация Docker-образа
-        run: docker push ${{ secrets.DOCKER_USER }}/devops-node-starter:${{ github.sha }}
+      - name: Push image
+        run: docker push "${{ secrets.DOCKER_USER }}/devops-node-starter:${{ github.sha }}"
 
-      - name: Deploy over SSH
-        uses: appleboy/ssh-action@v0.1.6
-        with:
-          host: ${{ secrets.HOST }}
-          username: ${{ secrets.SSH_USER }}
-          key: ${{ secrets.SSH_KEY }}
-          timeout: 60s
-          command_timeout: 30m
-          script: |
-            echo "${{ secrets.DOCKER_PASS }}" | docker login -u ${{ secrets.DOCKER_USER }} --password-stdin
-            docker pull ${{ secrets.DOCKER_USER }}/devops-node-starter:${{ github.sha }}
-            docker stop devops-node-starter || true
-            docker rm devops-node-starter || true
-            docker run -d --name devops-node-starter -p 4545:4545 ${{ secrets.DOCKER_USER }}/devops-node-starter:${{ github.sha }}
+      # 4) Нативный SSH без docker-экшенов (чтобы Tailnet был виден)
+      - name: Prepare SSH client
+        run: |
+          sudo apt-get update
+          sudo apt-get -y install openssh-client netcat-openbsd
+          echo "${{ secrets.SSH_KEY }}" > id_ed25519
+          chmod 600 id_ed25519
+          echo "Waiting for SSH on ${{ secrets.HOST }}:22 ..."
+          # Ждём, пока порт 22 реально доступен
+          timeout 30s bash -c 'until nc -vz ${{ secrets.HOST }} 22; do sleep 2; done'
+
+      - name: Test SSH connectivity
+        run: |
+          ssh -i id_ed25519 -o StrictHostKeyChecking=no -o ConnectTimeout=15 \
+            "${{ secrets.SSH_USER }}@${{ secrets.HOST }}" "hostname && whoami"
+
+      - name: Deploy on NAS
+        run: |
+          ssh -i id_ed25519 -o StrictHostKeyChecking=no -o ConnectTimeout=20 \
+            "${{ secrets.SSH_USER }}@${{ secrets.HOST }}" <<'EOF'
+              echo "${{ secrets.DOCKER_PASS }}" | docker login -u "${{ secrets.DOCKER_USER }}" --password-stdin
+              docker pull "${{ secrets.DOCKER_USER }}/devops-node-starter:${{ github.sha }}"
+              docker stop devops-node-starter || true
+              docker rm   devops-node-starter || true
+              docker run -d --name devops-node-starter -p 4545:4545 \
+                "${{ secrets.DOCKER_USER }}/devops-node-starter:${{ github.sha }}"
+          EOF
